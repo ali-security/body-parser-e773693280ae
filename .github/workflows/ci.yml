@@ -1,16 +1,17 @@
 name: ci
 
 on:
-  push:
-    branches:
-      - 1.x
-  pull_request:
-    branches:
-      - 1.x
+  workflow_dispatch:
+    inputs:
+      test-filter:
+        description: 'Optional mocha --grep filter'
+        required: false
+        default: ''
 
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -172,6 +173,18 @@ jobs:
           npm config set shrinkwrap false
         fi
 
+    - name: Pin npm registry to release date
+      shell: bash
+      run: |
+        # Resolve dependencies as of the body-parser 1.20.4 release (2025-12-01);
+        # later qs 6.14.x enforces arrayLimit on index notation and breaks the large-array test.
+        if [[ "$(cut -d. -f1 <<< "${{ matrix.node-version }}")" -ge 4 ]]; then
+          echo "NPM_CONFIG_REGISTRY=https://:2025-12-01T15%3A53%3A40.942000Z@time-machines-npm.sealsecurity.io/" >> "$GITHUB_ENV"
+        else
+          # legacy npm 1.x/2.x legs: pre-install the release-time qs so `npm install` keeps it
+          npm install qs@6.14.0
+        fi
+
     - name: Remove npm module(s) ${{ matrix.npm-rm }}
       run: npm rm --silent --save-dev ${{ matrix.npm-rm }}
       if: matrix.npm-rm != ''
@@ -206,8 +219,12 @@ jobs:
 
     - name: Run tests
       shell: bash
+      env:
+        TEST_FILTER: ${{ github.event.inputs.test-filter }}
       run: |
-        if npm -ps ls nyc | grep -q nyc; then
+        if [[ -n "$TEST_FILTER" ]]; then
+          npm test -- --grep "$TEST_FILTER"
+        elif npm -ps ls nyc | grep -q nyc; then
           npm run test-ci
           cp coverage/lcov.info "coverage/${{ matrix.name }}.lcov"
         else
@@ -218,37 +235,29 @@ jobs:
       if: steps.list_env.outputs.eslint != ''
       run: npm run lint
 
-    - name: Upload code coverage
-      uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
-      with:
-        name: coverage-node-${{ matrix.node-version }}
-        path: ./coverage/lcov.info
-        retention-days: 1
-
-  coverage:
-    needs: test
+  pack:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      checks: write
+    timeout-minutes: 30
     steps:
     - uses: actions/checkout@v4
 
-    - name: Install lcov
-      shell: bash
-      run: sudo apt-get -y install lcov
-
-    - name: Collect coverage reports
-      uses: actions/download-artifact@v6
+    - name: Install Node.js
+      uses: actions/setup-node@v4
       with:
-        path: ./coverage
-        pattern: coverage-node-*
+        node-version: "22.10.0"
 
-    - name: Merge coverage reports
-      shell: bash
-      run: find ./coverage -name lcov.info -exec printf '-a %q\n' {} \; | xargs lcov -o ./lcov.info
+    - name: Install npm 10.9.0
+      run: npm install -g npm@10.9.0
 
-    - name: Upload coverage report
-      uses: coverallsapp/github-action@648a8eb78e6d50909eff900e4ec85cab4524a45b # v2.3.6
+    - name: Pack
+      run: |
+        node -v
+        npm -v
+        npm pack
+
+    - name: Upload npm tarball
+      uses: actions/upload-artifact@v4
       with:
-        file: ./lcov.info
+        name: npm-tarball
+        path: ./body-parser-*.tgz
+        if-no-files-found: error
